@@ -1,0 +1,145 @@
+name: Validate Paramiko 1161 correction
+on:
+  push:
+    branches: [validation/1161-known-hosts-case-20260918]
+    paths: [.github/workflows/wave-1161-validation.yml]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 142f593e40ad767c5e3556cbace66dc84589620c
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies
+        run: python -m pip install -e . pytest pytest-relaxed flake8
+      - name: Reproduce, correct, test, and stage source-only feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json, os, subprocess
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          base = '142f593e40ad767c5e3556cbace66dc84589620c'
+          repo = 'sankalpsthakur/paramiko'
+          feature = 'fix/1161-known-hosts-case'
+          evidence = Path('evidence')
+          report = {
+              'base': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'python': subprocess.check_output(['python', '--version'], text=True).strip(),
+              'issue': 'paramiko/paramiko#1161',
+              'feature_branch': feature,
+              'published': False,
+          }
+          assert report['base'] == base
+
+          source = Path('paramiko/hostkeys.py')
+          tests = Path('tests/test_hostkeys.py')
+          original_source = source.read_text()
+          original_tests = tests.read_text()
+          temporary = Path('tests/test_wave_1161_regression.py')
+          temporary.write_text('''from base64 import decodebytes\n\nimport paramiko\n\nfrom tests.test_hostkeys import keyblob\n\n\ndef _key():\n    return paramiko.RSAKey(data=decodebytes(keyblob))\n\n\ndef test_plain_hostname_lookup_is_case_insensitive(tmp_path):\n    key = _key()\n    keys = paramiko.HostKeys()\n    keys.add("example.com", "ssh-rsa", key)\n    assert keys.check("EXAMPLE.COM", key)\n\n\ndef test_hashed_hostname_lookup_is_case_insensitive(tmp_path):\n    key = _key()\n    keys = paramiko.HostKeys()\n    keys.add(paramiko.HostKeys.hash_host("example.com"), "ssh-rsa", key)\n    assert keys.check("EXAMPLE.COM", key)\n''')
+
+          def run(name, args, timeout=900):
+              proc = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+              (evidence / f'{name}.log').write_text(proc.stdout)
+              report[name] = {'command': args, 'exit': proc.returncode}
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+              print(name, proc.returncode, proc.stdout[-2600:], flush=True)
+              return proc
+
+          before = run('before', ['python', '-m', 'pytest', '-q', str(temporary)])
+          assert before.returncode != 0, 'Regression unexpectedly passes on pinned base'
+          assert '2 failed' in before.stdout, before.stdout[-2000:]
+
+          old = '''    def _hostname_matches(self, hostname, entry):\n        \"\"\"\n        Tests whether ``hostname`` string matches given SubDict ``entry``.\n\n        :returns bool:\n        \"\"\"\n        for h in entry.hostnames:\n            if (\n                h == hostname\n                or h.startswith(\"|1|\")\n                and not hostname.startswith(\"|1|\")\n                and constant_time_bytes_eq(self.hash_host(hostname, h), h)\n            ):\n                return True\n        return False\n'''
+          new = '''    def _hostname_matches(self, hostname, entry):\n        \"\"\"\n        Tests whether ``hostname`` string matches given SubDict ``entry``.\n\n        :returns bool:\n        \"\"\"\n        original_hostname = hostname\n        hostname = hostname.lower()\n        for h in entry.hostnames:\n            if (\n                h == original_hostname\n                or not h.startswith(\"|1|\")\n                and h.lower() == hostname\n                or h.startswith(\"|1|\")\n                and not original_hostname.startswith(\"|1|\")\n                and constant_time_bytes_eq(self.hash_host(hostname, h), h)\n            ):\n                return True\n        return False\n'''
+          assert original_source.count(old) == 1
+          source.write_text(original_source.replace(old, new))
+
+          marker = '''    def test_add(self):\n'''
+          addition = '''    def test_lookup_hostname_case_insensitive(self):\n        hostdict = paramiko.HostKeys(\"hostfile.temp\")\n        assert hostdict.lookup(\"SECURE.EXAMPLE.COM\") is not None\n\n    def test_lookup_hashed_hostname_case_insensitive(self):\n        key = paramiko.RSAKey(data=decodebytes(keyblob))\n        hostdict = paramiko.HostKeys()\n        hashed = paramiko.HostKeys.hash_host(\"secure.example.com\")\n        hostdict.add(hashed, \"ssh-rsa\", key)\n        assert hostdict.check(\"SECURE.EXAMPLE.COM\", key)\n\n'''
+          assert original_tests.count(marker) == 1
+          tests.write_text(original_tests.replace(marker, addition + marker))
+
+          after = run('focused_after', ['python', '-m', 'pytest', '-q', str(temporary), 'tests/test_hostkeys.py'])
+          assert after.returncode == 0
+          temporary.unlink()
+          assert run('affected_suites', ['python', '-m', 'pytest', '-q', 'tests/test_hostkeys.py', 'tests/test_client.py']).returncode == 0
+          assert run('full_suite', ['python', '-m', 'pytest', '-q'], 1200).returncode == 0
+          assert run('lint', ['python', '-m', 'flake8', 'paramiko/hostkeys.py', 'tests/test_hostkeys.py']).returncode == 0
+          assert run('whitespace', ['git', 'diff', '--check']).returncode == 0
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          report['changed_paths'] = changed
+          assert changed == ['paramiko/hostkeys.py', 'tests/test_hostkeys.py'], changed
+
+          final_source = source.read_bytes()
+          final_tests = tests.read_bytes()
+          (evidence / 'hostkeys.py').write_bytes(final_source)
+          (evidence / 'test_hostkeys.py').write_bytes(final_tests)
+          (evidence / 'correction.patch').write_bytes(subprocess.check_output(['git', 'diff', '--binary', '--', 'paramiko/hostkeys.py', 'tests/test_hostkeys.py']))
+          report['sha256'] = {
+              'paramiko/hostkeys.py': hashlib.sha256(final_source).hexdigest(),
+              'tests/test_hostkeys.py': hashlib.sha256(final_tests).hexdigest(),
+          }
+
+          prefix = f'https://api.github.com/repos/{repo}/'
+          headers = {
+              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+              'Accept': 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+          def api(path, data=None, method=None):
+              payload = None if data is None else json.dumps(data).encode()
+              req = Request(prefix + path, data=payload, headers=headers, method=method)
+              with urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          # Re-read both upstream-equivalent fork base and prospective branch before publishing.
+          current_main = api('git/ref/heads/main')['object']['sha']
+          assert current_main == base, f'main moved: {current_main}'
+          try:
+              api('git/ref/heads/' + feature)
+          except HTTPError as exc:
+              assert exc.code == 404
+          else:
+              raise AssertionError('feature branch unexpectedly already exists')
+
+          base_tree = api('git/commits/' + base)['tree']['sha']
+          elements = []
+          for path, content in [('paramiko/hostkeys.py', final_source), ('tests/test_hostkeys.py', final_tests)]:
+              blob = api('git/blobs', {'content': content.decode(), 'encoding': 'utf-8'})
+              elements.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = api('git/trees', {'base_tree': base_tree, 'tree': elements})
+          commit = api('git/commits', {
+              'message': 'Make known_hosts hostname matching case-insensitive\n\nNormalize DNS-style lookup names while preserving direct lookup of already-hashed hostnames. Add plaintext and hashed regressions for #1161.\n\nAI-assisted implementation and validation.',
+              'tree': tree['sha'],
+              'parents': [base],
+              'author': {'name': 'Sankalp Thakur', 'email': '31366524+sankalpsthakur@users.noreply.github.com'},
+          })
+          api('git/refs', {'ref': 'refs/heads/' + feature, 'sha': commit['sha']})
+          report['feature_head'] = commit['sha']
+          report['feature_tree'] = tree['sha']
+          report['published'] = True
+          (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paramiko-1161-validation
+          path: evidence/
+          retention-days: 14
