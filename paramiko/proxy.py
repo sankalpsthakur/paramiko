@@ -120,6 +120,7 @@ class ProxyCommand(ClosingContextManager):
 
     def close(self):
         os.kill(self.process.pid, signal.SIGTERM)
+        self.process.wait()
 
     @property
     def closed(self):
