@@ -83,6 +83,17 @@ class HostKeysTest(unittest.TestCase):
         ).upper()
         self.assertEqual(b"E6684DB30E109B67B70FF1DC5C7F1363", fp)
 
+    def test_lookup_hostname_case_insensitive(self):
+        hostdict = paramiko.HostKeys("hostfile.temp")
+        assert hostdict.lookup("SECURE.EXAMPLE.COM") is not None
+
+    def test_lookup_hashed_hostname_case_insensitive(self):
+        key = paramiko.RSAKey(data=decodebytes(keyblob))
+        hostdict = paramiko.HostKeys()
+        hashed = paramiko.HostKeys.hash_host("secure.example.com")
+        hostdict.add(hashed, "ssh-rsa", key)
+        assert hostdict.check("SECURE.EXAMPLE.COM", key)
+
     def test_add(self):
         hostdict = paramiko.HostKeys("hostfile.temp")
         hh = "|1|BMsIC6cUIP2zBuXR3t2LRcJYjzM=|hpkJMysjTk/+zzUUzxQEa2ieq6c="

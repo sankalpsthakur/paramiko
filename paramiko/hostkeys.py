@@ -193,11 +193,15 @@ class HostKeys(MutableMapping):
 
         :returns bool:
         """
+        original_hostname = hostname
+        hostname = hostname.lower()
         for h in entry.hostnames:
             if (
-                h == hostname
+                h == original_hostname
+                or not h.startswith("|1|")
+                and h.lower() == hostname
                 or h.startswith("|1|")
-                and not hostname.startswith("|1|")
+                and not original_hostname.startswith("|1|")
                 and constant_time_bytes_eq(self.hash_host(hostname, h), h)
             ):
                 return True
