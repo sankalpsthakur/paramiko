@@ -1,0 +1,44 @@
+name: Validate Paramiko 1161 correction v2
+on:
+  push:
+    branches: [validation/1161-known-hosts-case-20260918]
+    paths: [.github/workflows/wave-1161-validation-v2.yml]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 142f593e40ad767c5e3556cbace66dc84589620c
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies
+        run: python -m pip install -e . pytest pytest-relaxed flake8 icecream
+      - name: Run corrected validation script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import urlopen
+          import textwrap
+          url = 'https://raw.githubusercontent.com/sankalpsthakur/paramiko/bece8a30e29541ab88c93c27f3c26d66299cc9ee/.github/workflows/wave-1161-validation.yml'
+          workflow = urlopen(url, timeout=30).read().decode()
+          script = textwrap.dedent(workflow.split("          python - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
+          Path('evidence/validation.py').write_text(script)
+          exec(compile(script, '<validation>', 'exec'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paramiko-1161-validation-v2
+          path: evidence/
+          retention-days: 14
