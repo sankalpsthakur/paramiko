@@ -102,10 +102,11 @@ class TestProxyCommand:
 
     @patch("paramiko.proxy.subprocess.Popen")
     @patch("paramiko.proxy.os.kill")
-    def test_close_kills_subprocess(self, os_kill, Popen):
+    def test_close_kills_and_reaps_subprocess(self, os_kill, Popen):
         proxy = ProxyCommand("hi")
         proxy.close()
         os_kill.assert_called_once_with(Popen.return_value.pid, signal.SIGTERM)
+        Popen.return_value.wait.assert_called_once_with()
 
     @patch("paramiko.proxy.subprocess.Popen")
     def test_closed_exposes_whether_subprocess_has_exited(self, Popen):
