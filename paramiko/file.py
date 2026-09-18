@@ -153,6 +153,26 @@ class BufferedFile(ClosingContextManager):
         buff[: len(data)] = data
         return len(data)
 
+    def _consume_rbuffer(self, size):
+        if size == 0:
+            return bytes()
+        if size >= len(self._rbuffer):
+            result = bytes(self._rbuffer)
+            self._rbuffer = bytes()
+            return result
+
+        view = memoryview(self._rbuffer)
+        result = bytes(view[:size])
+        remainder = view[size:]
+        # Keep front-consumption cheap, but periodically compact so a tiny
+        # unread suffix does not retain a much larger backing buffer forever.
+        self._rbuffer = (
+            bytes(remainder)
+            if len(remainder) * 2 <= len(remainder.obj)
+            else remainder
+        )
+        return result
+
     def read(self, size=None):
         """
         Read at most ``size`` bytes from the file (less if we hit the end of
@@ -191,8 +211,7 @@ class BufferedFile(ClosingContextManager):
                 self._pos += len(new_data)
             return bytes(result)
         if size <= len(self._rbuffer):
-            result = self._rbuffer[:size]
-            self._rbuffer = self._rbuffer[size:]
+            result = self._consume_rbuffer(size)
             self._pos += len(result)
             return result
         while len(self._rbuffer) < size:
@@ -205,10 +224,11 @@ class BufferedFile(ClosingContextManager):
                 new_data = None
             if (new_data is None) or (len(new_data) == 0):
                 break
+            if isinstance(self._rbuffer, memoryview):
+                self._rbuffer = self._rbuffer.tobytes()
             self._rbuffer += new_data
             self._realpos += len(new_data)
-        result = self._rbuffer[:size]
-        self._rbuffer = self._rbuffer[size:]
+        result = self._consume_rbuffer(size)
         self._pos += len(result)
         return result
 
@@ -239,7 +259,7 @@ class BufferedFile(ClosingContextManager):
             raise IOError("File is closed")
         if not (self._flags & self.FLAG_READ):
             raise IOError("File not open for reading")
-        line = self._rbuffer
+        line = bytes(self._rbuffer)
         truncated = False
         while True:
             if (
